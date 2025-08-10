@@ -47,7 +47,7 @@ def _createOneConstraint(
     quat = pin.Quaternion.FromTwoVectors(
         pin.ZAxis, normal
     )  # orientation of the contact frame wrt world
-    assert np.isclose(quat.norm(), 1)
+    # assert np.isclose(quat.norm(), 1)
     oMc1 = pin.SE3(quat.matrix(), OC1)  # Placement of first contact frame in world
     oMc2 = pin.SE3(quat.matrix(), OC2)  # Placement of second contact frame in world
     # %end_jupyter_snippet

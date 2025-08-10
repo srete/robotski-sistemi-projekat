@@ -20,6 +20,7 @@ class SimulationConfig:
     def __init__(self, model, dt=1e-4, dt_visu=1/50., duration=5.,
                  mu=0.8, max_staggered_iters=20, staggered_tol=1e-6,
                  enable_friction=True,
+                 enable_contact=True,
                  record_video=False, recording_dir='recordings/', 
                  video_filename=None, video_resolution=(1280, 720)):
         
@@ -32,6 +33,7 @@ class SimulationConfig:
         self.v = np.zeros(model.nv)
         self.tau = np.zeros(model.nv)
         self.MU = mu
+        self.enable_contact = enable_contact
         self.enable_friction = enable_friction
         self.MAX_STAGGERED_ITERS = max_staggered_iters
         self.STAGGERED_TOL = staggered_tol
@@ -51,12 +53,13 @@ class SimulationConfig:
             self.video_resolution = video_resolution
 
 class Simulation:
-    def __init__(self, config, model, data, geom_model, geom_data):
+    def __init__(self, config, model, data, geom_model, geom_data, qdes=None):
         self.config = config
         self.model = model
         self.data = data
         self.geom_model = geom_model
         self.geom_data = geom_data
+        self.qdes = qdes
         self.contact_models = []
         self.contact_datas = []
         self.writer = None
@@ -119,20 +122,33 @@ class Simulation:
             pin.computeCollisions(self.model, self.data, self.geom_model, self.geom_data, q)
             self.contact_models = createContactModelsFromCollisions(self.model, self.data, self.geom_model, self.geom_data)
             self.contact_datas = [cm.createData() for cm in self.contact_models]
-            nc = len(self.contact_models)
+            if self.config.enable_contact:
+                nc = len(self.contact_models)
+            else:
+                nc = 0
 
             # Compute free dynamics
-            pin.computeAllTerms(self.model, self.data, q, v)
-            tau.fill(0)
-            a_free = pin.aba(self.model, self.data, q, v, tau)
-            vf = v + DT * a_free
+
+            # With control
+            if self.qdes is not None:
+
+                M = pin.crba(model, data, q)
+                b = pin.nle(model, data, q, v)
+                tauq = -Kp * (q - qdes(t*DT)) - Kv * (v - qdes.velocity(t*DT)) + qdes.acceleration(t*DT)
+                a_contorl = np.linalg.inv(M) @ (tauq - b)
+                vf = v + DT * a_contorl
+            else:
+                pin.computeAllTerms(self.model, self.data, q, v)
+                tau.fill(0)
+                a_free = pin.aba(self.model, self.data, q, v, tau)
+                vf = v + DT * a_free
 
             # Solve for contact dynamics if there are contacts
             if nc == 0:
                 v = vf
             else:
                 # First QP -- Solve for normal contact forces
-                pin.computeAllTerms(self.model, self.data, q, v)
+                pin.computeAllTerms(self.model, self.data, q, v)  # v ili vf?
                 J = -pin.getConstraintsJacobian(self.model, self.data, self.contact_models, self.contact_datas)[2::3,:]
                 M = self.data.M
                 
@@ -206,34 +222,47 @@ class Simulation:
 
 if __name__ == "__main__":
 
-
     # --- MODEL ---
-    model, geom_model = buildSceneHouseOfCards(seed = 42)
+    model, geom_model = buildSceneRobotHand()
     data = model.createData()
     geom_data = geom_model.createData()
 
     for req in geom_data.collisionRequests:
         req.security_margin = 1e-2
-        req.num_max_contacts = 50
+        req.num_max_contacts = 10
         req.enable_contact = True
+
+
+    from tp5.traj_ref import TrajRef  # noqa E402
+    # Hyperparameters for the control
+    Kp = 50.0  # proportional gain (P of PD)
+    Kv = 2 * np.sqrt(Kp)  # derivative gain (D of PD)
+    q0 = model.referenceConfigurations['default']
+    qdes = TrajRef(
+        q0,
+        omega=np.array([0, 0.1, 1, 1.5, 2.5, -1, -1.5, -2.5, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
+        amplitude=1.5,
+    )
 
 
     # --- SIMULATION PARAMETERS ---
     DT = 1e-4
-    DT_VISU = 1/50.
-    DURATION = 5.
+    DT_VISU = 1/50
+    DURATION = 4
     MU = 0.8
     MAX_STAGGERED_ITERS = 20
     STAGGERED_TOL = 1e-6
-    ENABLE_FRICTION = False
+    ENABLE_FRICTION = True # False
+    RECORD_VIDEO = True
 
     # Configure the simulation
     config = SimulationConfig(model, dt=DT, dt_visu=DT_VISU, duration=DURATION, 
                               mu=MU, max_staggered_iters=MAX_STAGGERED_ITERS, staggered_tol=STAGGERED_TOL,
                               enable_friction=ENABLE_FRICTION,
-                              record_video=True, video_filename="cubes_no_friction.mp4",) 
+                              enable_contact=True,
+                              record_video=RECORD_VIDEO, video_filename="friction_hand.mp4",) 
                               
-    simulation = Simulation(config, model, data, geom_model, geom_data)
+    simulation = Simulation(config, model, data, geom_model, geom_data, qdes=qdes)
     
     # Run simulator
     simulation.run()
