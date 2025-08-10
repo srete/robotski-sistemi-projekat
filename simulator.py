@@ -14,7 +14,7 @@ from tp5.create_rigid_contact_models_for_hppfcl import createContactModelsFromCo
 from tp5.scenes import buildSceneThreeBodies, buildScenePillsBox, buildSceneCubes, buildSceneRobotHand, buildSceneHouseOfCards
 from tp5.display_collision_patches import preallocateVisualObjects, updateVisualObjects
 
-from tp5.scenes import buildSceneQuadrupedOnHills, buildSceneHandAndStackedCubes, buildSceneTalosFallingCube, buildScenePyramidAndBall
+from tp5.scenes import buildSceneQuadrupedOnHills, buildSceneHandAndStackedCubes, buildSceneTalosFallingCube
 
 
 from schaeffler2025.meshcat_viewer_wrapper import MeshcatVisualizer
@@ -25,7 +25,8 @@ class SimulationConfig:
                  enable_friction=True,
                  enable_contact=True,
                  record_video=False, recording_dir='recordings/', 
-                 video_filename=None, video_resolution=(1280, 720)):
+                 video_filename=None, video_resolution=(1280, 720),
+                 initial_v=None):
         
         # --- Simulation Parameters ---
         self.DT = dt
@@ -33,7 +34,7 @@ class SimulationConfig:
         self.DURATION = duration
         self.T = int(self.DURATION / self.DT)
         self.q = model.referenceConfigurations['default']
-        self.v = np.zeros(model.nv)
+        self.v = initial_v if initial_v is not None else np.zeros(model.nv)
         self.tau = np.zeros(model.nv)
         self.MU = mu
         self.enable_contact = enable_contact
@@ -56,7 +57,7 @@ class SimulationConfig:
             self.video_resolution = video_resolution
 
 class Simulation:
-    def __init__(self, config, model, data, geom_model, geom_data, qdes=None):
+    def __init__(self, config, model, data, geom_model, geom_data, qdes=None, Kp=50.0):
         self.config = config
         self.model = model
         self.data = data
@@ -66,6 +67,8 @@ class Simulation:
         self.contact_models = []
         self.contact_datas = []
         self.writer = None
+        self.Kp = Kp  
+        self.Kv = 2*np.sqrt(self.Kp) 
         
         self.initialize_viz()
         
@@ -134,10 +137,10 @@ class Simulation:
 
             # With control
             if self.qdes is not None:
-
-                M = pin.crba(model, data, q)
-                b = pin.nle(model, data, q, v)
-                tauq = -Kp * (q - qdes(t*DT)) - Kv * (v - qdes.velocity(t*DT)) + qdes.acceleration(t*DT)
+                
+                M = pin.crba(self.model, self.data, q)
+                b = pin.nle(self.model, self.data, q, v)
+                tauq = -self.Kp * pin.difference(self.model, q, self.qdes(t*DT)) - self.Kv * (v - self.qdes.velocity(t*DT)) + self.qdes.acceleration(t*DT)                
                 a_contorl = np.linalg.inv(M) @ (tauq - b)
                 vf = v + DT * a_contorl
             else:
