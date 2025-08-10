@@ -7,7 +7,7 @@ import numpy as np
 import pinocchio as pin
 
 from tp5.robot_hand import RobotHand
-
+from example_robot_data.robots_loader import load as load_robot
 
 def buildScenePillsBox(
     nobj=30, wall_size=4.0, seed=0, no_walls=False, one_of_each=False
@@ -463,7 +463,90 @@ def buildSceneCubes(
 
     return model, geom_model
 
+def buildScenePyramidAndBall(levels=4, cube_size=0.1, cube_mass=0.1, ball_mass=0.5):
+    """
+    Creates a scene with a pyramid of stacked cubes and a ball positioned
+    to be projected horizontally into its base.
+    
+    Args:
+        levels (int): The number of levels in the pyramid base (e.g., 4 for a 4x4 base).
+        cube_size (float): The side length of each cube.
+        cube_mass (float): The mass of each cube.
+        ball_mass (float): The mass of the ball.
+    """
+    model = pin.Model()
+    geom_model = pin.GeometryModel()
+    q0_list = []
+    
+    # --- Define Shapes and Inertias ---
+    cube_shape = hppfcl.Box(cube_size, cube_size, cube_size)
+    cube_inertia = pin.Inertia.FromBox(cube_mass, cube_size, cube_size, cube_size)
+    ball_radius = cube_size * 1.2
+    ball_shape = hppfcl.Sphere(ball_radius)
+    ball_inertia = pin.Inertia.FromSphere(ball_mass, ball_radius)
 
+    # --- Define Color Gradient ---
+    color_start = np.array([0.2, 0.2, 0.8, 1.0])  # Blue
+    color_end = np.array([0.8, 0.2, 0.2, 1.0])    # Red
+
+    # Helper to add a free-flying body
+    def _add_body(name, shape, inertia, placement, color):
+        model_item = pin.Model()
+        geom_model_item = pin.GeometryModel()
+        joint_name = f"joint_{name}"
+        jid = model_item.addJoint(0, pin.JointModelFreeFlyer(), pin.SE3.Identity(), joint_name)
+        model_item.appendBodyToJoint(jid, inertia, pin.SE3.Identity())
+        geom = pin.GeometryObject(name, jid, jid, pin.SE3.Identity(), shape)
+        geom.meshColor = color
+        geom_model_item.addGeometryObject(geom)
+        
+        # We need to provide the placement of the free-flyer's JOINT in the world
+        nonlocal model, geom_model
+        model, geom_model = pin.appendModel(
+            model, model_item, geom_model, geom_model_item, 0, placement
+        )
+        # The configuration is just the world placement of the joint
+        q0 = np.concatenate([placement.translation, pin.Quaternion(placement.rotation).coeffs()])
+        q0_list.append(q0)
+
+    # --- Build the Pyramid (from bottom up) ---
+    for level in range(levels):
+        num_cubes_side = levels - level
+        z = level * cube_size + cube_size / 2.0
+        
+        # Interpolate color for this level
+        alpha = level / (levels - 1) if levels > 1 else 1.0
+        color = (1 - alpha) * color_start + alpha * color_end
+
+        for i in range(num_cubes_side):
+            for j in range(num_cubes_side):
+                # Center the grid of cubes at (0,0)
+                x = (i - (num_cubes_side - 1) / 2.0) * cube_size
+                y = (j - (num_cubes_side - 1) / 2.0) * cube_size
+                
+                pos = np.array([x, y, z])
+                placement = pin.SE3(np.eye(3), pos)
+                name = f"cube_L{level}_R{i}_C{j}"
+                _add_body(name, cube_shape, cube_inertia, placement, color)
+
+    # --- Add the Ball ---
+    pyramid_base_half_width = (levels / 2.0) * cube_size
+    ball_pos = np.array([
+        -(pyramid_base_half_width + ball_radius * 2), # Positioned to the side (-X)
+        0.0,
+        ball_radius # Resting on the floor
+    ])
+    ball_placement = pin.SE3(np.eye(3), ball_pos)
+    _add_body("ball", ball_shape, ball_inertia, ball_placement, color_start) # Blue ball
+
+    # --- Finalize Scene ---
+    model.referenceConfigurations["default"] = np.concatenate(q0_list)
+    addFloor(geom_model, altitude=0.0)
+    # Re-enable all collision pairs now that the floor is added.
+    geom_model.addAllCollisionPairs()
+
+    return model, geom_model
+    
 def buildSceneRobotHand(with_item=False, item_size=0.05):
     robot = RobotHand()
 
@@ -694,15 +777,16 @@ def buildSceneHouseOfCards(
     model.referenceConfigurations["default"] = np.concatenate(q0_list)
 
     return model, geom_model
-
 def buildSceneHandAndStackedCubes():
     """
     Builds the scene from the image: an Allegro hand holding a blue cube
     with a red cube stacked on top.
+    This version uses the standard model from example-robot-data and fixes the appendModel bug.
     """
-    # 1. Load the robot hand
-    hand = RobotHand()
-    model, geom_model = hand.model, hand.gmodel
+    # 1. Load the correct Allegro Hand model
+    robot = load_robot("allegro_right_hand")
+    model, geom_model = robot.model, robot.collision_model
+    visual_model = robot.visual_model
 
     # 2. Define the two cubes
     cube_size = 0.05
@@ -715,13 +799,11 @@ def buildSceneHandAndStackedCubes():
         {"name": "red_cube", "color": np.array([0.8, 0.2, 0.2, 1.0])},
     ]
 
-    # 3. Append cubes to the main model
+    # 3. Append cubes to the models correctly
     for cube_info in cubes_to_add:
-        # Create a temporary model for the cube
         model_item = pin.Model()
         geom_model_item = pin.GeometryModel()
         
-        # FIX: Use the unique cube name to create a unique joint name.
         joint_name = f"joint_{cube_info['name']}"
         jid = model_item.addJoint(0, pin.JointModelFreeFlyer(), pin.SE3.Identity(), joint_name)
         model_item.appendBodyToJoint(jid, cube_inertia, pin.SE3.Identity())
@@ -730,51 +812,69 @@ def buildSceneHandAndStackedCubes():
         geom.meshColor = cube_info["color"]
         geom_model_item.addGeometryObject(geom)
         
-        # Append to the main model
+
         model, geom_model = pin.appendModel(
             model, model_item, geom_model, geom_model_item, 0, pin.SE3.Identity()
         )
+        
+
+        new_joint_id = model.getJointId(joint_name)
+        visual_geom = geom.copy() # Create a copy for the visual model
+        visual_geom.parentJoint = new_joint_id
+        visual_model.addGeometryObject(visual_geom)
+
 
     # 4. Set up the initial configuration to match the image
-    q0_hand = hand.model.referenceConfigurations["default"].copy()
-    # Pose the hand in a grasping configuration (values are approximate)
-    q0_hand[7:] = np.array([0.0, 0.9, 0.5, 0.0] * 4) # Spread fingers
+    q0_hand = model.referenceConfigurations["default"].copy()
 
-    # Position the cubes
-    # The hand's default reference is at the origin. We place the cubes relative to that.
-    hand_grasp_z = 0.15 # Approximate height of the palm
+    # 5. Position the hand correctly
+    hand_base_z = 0.1
+    q0_hand[2] = hand_base_z  # Lift hand's base
+    q0_hand[3:7] = pin.Quaternion.Identity().coeffs() # Make it upright
+
+    # 6. Set the 7 finger joints to a grasping pose
+    if len(q0_hand[7:]) == 7:
+        q0_hand[7:] = np.array([0.0, 0.9, 0.5, 0.0, 0.9, 0.5, 0.0])
+    else:
+        print(f"Warning: Hand model has {len(q0_hand[7:])} finger joints, not 7.")
+    # 5. Dynamically find the palm position to place the cubes correctly
+    data = model.createData()
+    palm_link_id = model.getFrameId("palm_link")
+    pin.forwardKinematics(model, data, q0_hand)
+    pin.updateFramePlacements(model, data)
+    palm_placement = data.oMf[palm_link_id]
+
     # Blue cube in the palm
-    blue_cube_pos = np.array([0.0, 0.0, hand_grasp_z])
-    blue_cube_quat = pin.Quaternion.Identity().coeffs()
-    q0_blue_cube = np.concatenate([blue_cube_pos, blue_cube_quat])
+    blue_cube_placement = palm_placement.copy()
+    blue_cube_placement.translation[2] += cube_size / 2 + 0.01
+    q0_blue_cube = np.concatenate([blue_cube_placement.translation, pin.Quaternion(blue_cube_placement.rotation).coeffs()])
 
-    # Red cube on top of the blue one
-    red_cube_pos = np.array([0.0, 0.0, hand_grasp_z + cube_size])
-    # Tilt it slightly
-    red_cube_rot = pin.rpy.rpyToMatrix(0.1, -0.2, 0.05)
-    red_cube_quat = pin.Quaternion(red_cube_rot).coeffs()
-    q0_red_cube = np.concatenate([red_cube_pos, red_cube_quat])
-
-    # The order of appended models is hand, blue_cube, red_cube.
-    # The free-flyer joints are added at the start of the configuration vector.
+    # Red cube on top of the blue one, slightly tilted
+    red_cube_placement = blue_cube_placement.copy()
+    red_cube_placement.translation[2] += cube_size
+    tilt_rotation = pin.rpy.rpyToMatrix(0.1, -0.2, 0.05)
+    red_cube_placement.rotation = tilt_rotation @ red_cube_placement.rotation
+    q0_red_cube = np.concatenate([red_cube_placement.translation, pin.Quaternion(red_cube_placement.rotation).coeffs()])
+    
+    # 6. Assemble the final configuration vector
     model.referenceConfigurations["default"] = np.concatenate([
         q0_blue_cube,
         q0_red_cube,
         q0_hand
     ])
     
-    # 5. Add collision pairs
+    # 7. Add collision pairs and a floor
     geom_model.addAllCollisionPairs()
-    addFloor(geom_model, altitude=-0.01) # Add a floor just below
+    addFloor(geom_model, altitude=0.0)
 
-    return model, geom_model
-
-def buildSceneTalosAndCube():
+    # Return the visual model for a better rendering
+    return model, visual_model
+def buildSceneTalosFallingCube():
     robot = load_robot("talos")
     model, geom_model = robot.model, robot.collision_model
 
-    cube_size = 0.5
-    cube_mass = 10.0
+    cube_size = 0.4
+    cube_mass = 5.0
     cube_shape = hppfcl.Box(cube_size, cube_size, cube_size)
     cube_inertia = pin.Inertia.FromBox(cube_mass, cube_size, cube_size, cube_size)
 
@@ -789,20 +889,32 @@ def buildSceneTalosAndCube():
     model, geom_model = pin.appendModel(
         model, model_item, geom_model, geom_model_item, 0, pin.SE3.Identity()
     )
-    
+
     q0_robot = robot.q0.copy()
-    fall_rotation = pin.rpy.rpyToMatrix(0, -np.pi/2, 0)
-    q0_robot[3:7] = pin.Quaternion(fall_rotation).coeffs()
-    q0_robot[2] = 0.2 # Lift it slightly off the ground
+
+    rot_base = pin.rpy.rpyToMatrix(0, 0, np.pi)
+    q0_robot[3:7] = pin.Quaternion(rot_base).coeffs()
     
-    cube_pos = np.array([0.25, 0.0, 0.1])
-    cube_rot = pin.rpy.rpyToMatrix(0.1, 0.2, 0.1)
-    cube_quat = pin.Quaternion(cube_rot).coeffs()
+    # Set robot base position on floor at z=0, x=y=0 or desired
+    q0_robot[0] = 0.0  # x position of robot base
+    q0_robot[1] = 0.0  # y position of robot base
+    q0_robot[2] = 0.0  # z position of robot base (on floor)
+    
+    q0_robot[model.getJointId("leg_left_4_joint")] = 0.5   # Left knee
+    q0_robot[model.getJointId("leg_right_4_joint")] = 0.5  # Right knee
+    q0_robot[model.getJointId("leg_left_2_joint")] = -0.25 # Left hip pitch
+    q0_robot[model.getJointId("leg_right_2_joint")] = -0.25# Right hip pitch
+    q0_robot[model.getJointId("arm_left_2_joint")] = 0.5
+    q0_robot[model.getJointId("arm_right_2_joint")] = 0.5
+    
+    # Place the cube above the robot on the floor, for example 1 meter above floor
+    cube_pos = np.array([-0.2, 0.0, 1.0])  # cube 1 meter above floor
+    
+    cube_quat = pin.Quaternion.Identity().coeffs()
     q0_cube = np.concatenate([cube_pos, cube_quat])
 
     model.referenceConfigurations["default"] = np.concatenate([q0_cube, q0_robot])
 
-    # 5. Add collision pairs
     geom_model.addAllCollisionPairs()
     addFloor(geom_model, altitude=0.0)
 
@@ -810,41 +922,44 @@ def buildSceneTalosAndCube():
 
 def buildSceneQuadrupedOnHills():
     """
-    Builds the scene from the image: a quadruped robot (Anymal) standing
-    on uneven, hilly terrain.
+    Builds the scene: a quadruped robot on steep terrain.
+
+    This version uses a single, large, tilted box for the terrain to be
+    efficient and prevent memory crashes.
     """
-    robot = load_robot("anymal")
+    # 1. Load the quadruped robot
+    robot = load_robot("go2")
     model, geom_model = robot.model, robot.collision_model
 
-    nx = 50  # Number of vertices along x
-    ny = 50  # Number of vertices along y
-    x_size = 4.0  # meters
-    y_size = 4.0  # meters
+    # 2. Create a single large, thin box to act as the steep terrain
+    terrain_size = [5.0, 5.0, 0.1] # [width, depth, thickness]
+    terrain_shape = hppfcl.Box(*terrain_size)
 
-    x_coords = np.linspace(-x_size / 2, x_size / 2, nx)
-    y_coords = np.linspace(-y_size / 2, y_size / 2, ny)
-    X, Y = np.meshgrid(x_coords, y_coords)
-    heights = 0.1 * np.sin(2 * X) + 0.08 * np.cos(3 * Y) - 0.1 # Center around z=0
-    
-    terrain_shape = hppfcl.HeightField(
-        x_size, y_size, heights.T.copy()
-    )
-    
+    # 3. Create a tilted placement for the terrain
+    terrain_angle = np.deg2rad(20.0) # 20 degree slope
     terrain_placement = pin.SE3.Identity()
-    terrain_geom = pin.GeometryObject(
-        "terrain", 0, 0, terrain_placement, terrain_shape
-    )
+    terrain_placement.rotation = pin.rpy.rpyToMatrix(0, -terrain_angle, 0)
+
+    # 4. Add the terrain geometry to the model
+    terrain_geom = pin.GeometryObject("steep_terrain", 0, 0, terrain_placement, terrain_shape)
     terrain_geom.meshColor = np.array([0.6, 0.6, 0.8, 1.0])
     terrain_id = geom_model.addGeometryObject(terrain_geom)
 
-    # 3. Add collision pairs between the robot and the terrain
+    # 5. Add collision pairs between the robot and the single terrain object
     for g_obj in geom_model.geometryObjects:
-        if g_obj.parentJoint != 0: # Collide all robot parts with terrain
-            geom_model.addCollisionPair(pin.CollisionPair(geom_model.getGeometryId(g_obj.name), terrain_id))
+        # Check that it's a robot part and not the terrain itself
+        if "terrain" not in g_obj.name:
+             geom_model.addCollisionPair(pin.CollisionPair(geom_model.getGeometryId(g_obj.name), terrain_id))
 
+    # 6. Set initial configuration for the robot on the slope
     q0 = robot.q0.copy()
-    q0[0] = 0.5 # Move it forward a bit onto a slope
-    q0[2] = 0.6 # Adjust height to be above the terrain
+    # Position the robot on the slope
+    q0[0] = 0.5
+    q0[2] = 0.8
+    # Rotate the robot's base to align with the slope
+    base_rotation = pin.rpy.rpyToMatrix(0, -terrain_angle, 0)
+    q0[3:7] = pin.Quaternion(base_rotation).coeffs()
+    
     model.referenceConfigurations["default"] = q0
     
     return model, geom_model

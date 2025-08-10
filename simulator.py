@@ -14,6 +14,9 @@ from tp5.create_rigid_contact_models_for_hppfcl import createContactModelsFromCo
 from tp5.scenes import buildSceneThreeBodies, buildScenePillsBox, buildSceneCubes, buildSceneRobotHand, buildSceneHouseOfCards
 from tp5.display_collision_patches import preallocateVisualObjects, updateVisualObjects
 
+from tp5.scenes import buildSceneQuadrupedOnHills, buildSceneHandAndStackedCubes, buildSceneTalosFallingCube, buildScenePyramidAndBall
+
+
 from schaeffler2025.meshcat_viewer_wrapper import MeshcatVisualizer
 
 class SimulationConfig:
