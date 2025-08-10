@@ -1,158 +1,239 @@
-# --- NEW: Import Image from Pillow for resizing ---
 from PIL import Image
 import imageio 
+import os
+import datetime
 
-# (The rest of your imports are the same)
 import hppfcl
 import pinocchio as pin
 import numpy as np
 import time
 from proxsuite import proxqp
 import proxsuite
-QP = proxsuite.proxqp.dense.QP
 
 from tp5.create_rigid_contact_models_for_hppfcl import createContactModelsFromCollisions
 from tp5.scenes import buildSceneThreeBodies, buildScenePillsBox, buildSceneCubes, buildSceneRobotHand
-
 from tp5.display_collision_patches import preallocateVisualObjects, updateVisualObjects
+
 from schaeffler2025.meshcat_viewer_wrapper import MeshcatVisualizer
 
-# (Your utility function remains the same)
-def get_staggered_jacobians_from_pinocchio(model, data, contact_models, contact_datas):
-    J_full = pin.getConstraintsJacobian(model, data, contact_models, contact_datas)
-    J_n = J_full[2::3, :]
-    nc, nv = len(contact_models), model.nv
-    J_t = np.zeros((4 * nc, nv))
-    J_t1, J_t2 = J_full[0::3, :], J_full[1::3, :]
-    J_t[0::4, :], J_t[1::4, :], J_t[2::4, :], J_t[3::4, :] = J_t1, -J_t1, J_t2, -J_t2
-    E = np.zeros((nc, nc * 4))
-    for i in range(nc): E[i, i * 4 : (i + 1) * 4] = 1.0
-    return J_n, J_t, E
-
-# --- SIMULATION SETUP ---
-model, geom_model = buildSceneCubes(3)
-data = model.createData()
-geom_data = geom_model.createData()
-
-for req in geom_data.collisionRequests:
-    req.security_margin = 1e-2
-    req.num_max_contacts = 50
-    req.enable_contact = True
-
-# --- VIZUALIZATION ---
-visual_model = geom_model.copy()
-num_geoms = len(geom_model.geometryObjects)
-preallocateVisualObjects(visual_model, num_geoms * req.num_max_contacts)
-viz = MeshcatVisualizer(model=model, collision_model=geom_model, visual_model=visual_model)
-updateVisualObjects(model,data,[],[],visual_model,viz)
-
-# --- SIMULATION PARAMETERS ---
-DT = 1e-4
-DT_VISU = 1/50.
-DURATION = 5.
-T = int(DURATION / DT)
-q = model.referenceConfigurations['default']
-v = np.zeros(model.nv)
-tau = np.zeros(model.nv)
-
-MU = 0.8
-MAX_STAGGERED_ITERS = 20
-STAGGERED_TOL = 1e-6
-
-# --- VIDEO RECORDING SETUP ---
-import datetime
-timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-VIDEO_FILENAME = f"cubes_simulation_{timestamp}.mp4"
-VIDEO_FPS = int(1 / DT_VISU)
-# --- NEW: Define a fixed, standard resolution for the video ---
-# These dimensions are divisible by 16, which is ideal for most video codecs.
-VIDEO_RESOLUTION = (1280, 720) 
-
-# writer = imageio.get_writer(VIDEO_FILENAME, fps=VIDEO_FPS)
-print(f"Recording video to {VIDEO_FILENAME} at {VIDEO_FPS} FPS.")
-print(f"Video resolution will be fixed to {VIDEO_RESOLUTION}.")
-
-
-# --- SIMULATION LOOP ---
-viz.display(q)
-viz.last_time = time.time()
-time.sleep(1.0) 
-
-for t in range(T):
-    pin.computeCollisions(model, data, geom_model, geom_data, q)
-    contact_models = createContactModelsFromCollisions(model, data, geom_model, geom_data)
-    contact_datas = [cm.createData() for cm in contact_models]
-    nc = len(contact_models)
- 
-    pin.computeAllTerms(model, data, q, v)
-    tau.fill(0)
-    a_free = pin.aba(model, data, q, v, tau)
-    vf = v + DT * a_free
-
-    if nc == 0:
-        v = vf
-    else:
-        pin.computeAllTerms(model, data, q, v)
-        J = -pin.getConstraintsJacobian(model, data, contact_models, contact_datas)[2::3,:]
-        assert(J.shape == (nc,model.nv))
-        M = data.M
+class SimulationConfig:
+    def __init__(self, model, dt=1e-4, dt_visu=1/50., duration=5.,
+                 mu=0.8, max_staggered_iters=20, staggered_tol=1e-6,
+                 enable_friction=True,
+                 record_video=False, recording_dir='recordings/', 
+                 video_filename=None, video_resolution=(1280, 720)):
         
-        qp1 = QP(model.nv, 0, nc, False)
-        qp1.init(H=data.M, g=-data.M @ vf, A=None, b=None, C=J, l=np.zeros(nc))
-        qp1.settings.eps_abs = 1e-12
-        qp1.solve()
-        vnext = qp1.results.x
-        
-        J_n, J_t, E = get_staggered_jacobians_from_pinocchio(model, data, contact_models, contact_datas)
-        Minv = np.linalg.inv(data.M)
-        G_n, G_t, G_nt = J_n @ Minv @ J_n.T, J_t @ Minv @ J_t.T, J_n @ Minv @ J_t.T
-        alpha = np.zeros(nc)
-        beta = np.zeros(J_t.shape[0])
-        
-        vf = vnext
+        # --- Simulation Parameters ---
+        self.DT = dt
+        self.DT_VISU = dt_visu
+        self.DURATION = duration
+        self.T = int(self.DURATION / self.DT)
+        self.q = model.referenceConfigurations['default']
+        self.v = np.zeros(model.nv)
+        self.tau = np.zeros(model.nv)
+        self.MU = mu
+        self.enable_friction = enable_friction
+        self.MAX_STAGGERED_ITERS = max_staggered_iters
+        self.STAGGERED_TOL = staggered_tol
 
-        for k in range(MAX_STAGGERED_ITERS):
-            beta_old = beta.copy()
-            qp_g_n = J_n @ vf + G_nt @ beta
-            qp_contact = proxqp.dense.QP(nc, 0, nc, False)
-            qp_contact.init(H=G_n, g=qp_g_n, A=None, b=None, C=np.eye(nc), l=np.zeros(nc))
-            qp_contact.solve()
-            alpha = qp_contact.results.x
+        # --- Video Recording Parameters ---
+        self.record_video = record_video
+        self.recording_dir = recording_dir
+        if self.record_video:
+            if video_filename is None:
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                self.video_filename = f"simulation_{timestamp}.mp4"
+            else:
+                self.video_filename = video_filename
+            
+            self.video_filepath = os.path.join(self.recording_dir, self.video_filename)
+            self.video_fps = int(1 / self.DT_VISU) if self.DT_VISU > 0 else 30
+            self.video_resolution = video_resolution
 
-            qp_g_t = J_t @ vf + G_nt.T @ alpha
-            qp_friction = proxqp.dense.QP(J_t.shape[0], 0, J_t.shape[0] + nc, False)
-            C_friction = np.vstack([E, -np.eye(J_t.shape[0])])
-            u_friction = np.hstack([MU * alpha, np.zeros(J_t.shape[0])])
-            qp_friction.init(H=G_t, g=qp_g_t, A=None, b=None, C=C_friction, u=u_friction)
-            qp_friction.solve()
-            beta = qp_friction.results.x
+class Simulation:
+    def __init__(self, config, model, data, geom_model, geom_data):
+        self.config = config
+        self.model = model
+        self.data = data
+        self.geom_model = geom_model
+        self.geom_data = geom_data
+        self.contact_models = []
+        self.contact_datas = []
+        self.writer = None
+        
+        self.initialize_viz()
+        
+        if self.config.record_video:
+            self.initialize_recording()
 
-            if np.linalg.norm(beta - beta_old) < STAGGERED_TOL: break
-        
-        delta_v = Minv @ (J_n.T @ alpha + J_t.T @ beta)
-        v = vf + delta_v
+    def initialize_viz(self):
+        self.visual_model = self.geom_model.copy()
+        num_geoms = len(self.geom_model.geometryObjects)
+        # Ensure we are accessing the collision request correctly
+        if self.geom_data.collisionRequests:
+             num_max_contacts = self.geom_data.collisionRequests[0].num_max_contacts
+             preallocateVisualObjects(self.visual_model, num_geoms * num_max_contacts)
+        self.viz = MeshcatVisualizer(model=self.model, collision_model=self.geom_model, visual_model=self.visual_model)
+        updateVisualObjects(self.model, self.data, [], [], self.visual_model, self.viz)
 
-    q = pin.integrate(model, q, v * DT)
+    def initialize_recording(self):
+        """Sets up the video writer."""
+        if not os.path.exists(self.config.recording_dir):
+            os.makedirs(self.config.recording_dir)
+        
+        print(f"Recording video to {self.config.video_filepath}")
+        print(f"  FPS: {self.config.video_fps}, Resolution: {self.config.video_resolution}")
+        
+        self.writer = imageio.get_writer(self.config.video_filepath, fps=self.config.video_fps)
 
-    if DT_VISU is not None and (t*DT) % DT_VISU < DT:
-        updateVisualObjects(model, data, contact_models, contact_datas, visual_model, viz)
-        viz.display(q)
-        
-        # --- FRAME CAPTURE AND RESIZING ---
-        # Capture the image from the viewer
-        img = viz.viewer.get_image()
-        
-        # --- NEW: Resize the image to our fixed resolution ---
-        # This ensures every frame has the same size, fixing the ValueError.
-        # We use LANCZOS for high-quality resampling.
-        img_resized = img.resize(VIDEO_RESOLUTION, Image.Resampling.LANCZOS)
-        
-        # Add the *resized* image (as a numpy array) to the video writer
-        # writer.append_data(np.array(img_resized))
-        
-        time.sleep(max(0, DT_VISU - (time.time() - viz.last_time)))
-        viz.last_time = time.time()
+    def get_staggered_jacobians_from_pinocchio(self):
+        '''Extracts the normal and tangential components of the constraints Jacobian'''
+        J_full = pin.getConstraintsJacobian(self.model, self.data, self.contact_models, self.contact_datas)
+        J_n = J_full[2::3, :]
+        nc, nv = len(self.contact_models), self.model.nv
+        J_t = np.zeros((4 * nc, nv))
+        J_t1, J_t2 = J_full[0::3, :], J_full[1::3, :]
+        J_t[0::4, :], J_t[1::4, :], J_t[2::4, :], J_t[3::4, :] = J_t1, -J_t1, J_t2, -J_t2
+        E = np.zeros((nc, nc * 4))
+        for i in range(nc): E[i, i * 4 : (i + 1) * 4] = 1.0
+        return J_n, J_t, E
 
-# --- FINALIZE AND SAVE VIDEO ---
- #writer.close()
-print(f"Video saved successfully to {VIDEO_FILENAME}")
+    def run(self):
+        '''Run the simulation loop'''
+        
+        # Initialize quadratic programming solver
+        QP = proxsuite.proxqp.dense.QP
+
+        # Display initial configuration
+        self.viz.display(self.config.q)
+        self.viz.last_time = time.time()
+        time.sleep(1.0)
+
+        # Extract initial configuration
+        q, v, tau = self.config.q, self.config.v, self.config.tau
+        DT = self.config.DT
+
+        # Main simulation loop
+        for t in range(self.config.T):
+            # Compute collisions and create contact models
+            pin.computeCollisions(self.model, self.data, self.geom_model, self.geom_data, q)
+            self.contact_models = createContactModelsFromCollisions(self.model, self.data, self.geom_model, self.geom_data)
+            self.contact_datas = [cm.createData() for cm in self.contact_models]
+            nc = len(self.contact_models)
+
+            # Compute free dynamics
+            pin.computeAllTerms(self.model, self.data, q, v)
+            tau.fill(0)
+            a_free = pin.aba(self.model, self.data, q, v, tau)
+            vf = v + DT * a_free
+
+            # Solve for contact dynamics if there are contacts
+            if nc == 0:
+                v = vf
+            else:
+                # First QP -- Solve for normal contact forces
+                pin.computeAllTerms(self.model, self.data, q, v)
+                J = -pin.getConstraintsJacobian(self.model, self.data, self.contact_models, self.contact_datas)[2::3,:]
+                M = self.data.M
+                
+                qp1 = QP(self.model.nv, 0, nc, False)
+                qp1.init(H=M, g=-M @ vf, A=None, b=None, C=J, l=np.zeros(nc))
+                qp1.settings.eps_abs = 1e-12
+                qp1.solve()
+                vf_contact = qp1.results.x
+                
+                if self.config.enable_friction:
+                    # Second QP -- Solve for friction forces
+                    # velocity from the first QP is the free velocity for the friction solve
+                    J_n, J_t, E = self.get_staggered_jacobians_from_pinocchio()
+                    Minv = np.linalg.inv(self.data.M)
+                    G_n, G_t, G_nt = J_n @ Minv @ J_n.T, J_t @ Minv @ J_t.T, J_n @ Minv @ J_t.T
+                    
+                    alpha = np.zeros(nc)
+                    beta = np.zeros(J_t.shape[0])
+
+                    for k in range(self.config.MAX_STAGGERED_ITERS):
+                        beta_old = beta.copy()
+                        
+                        # Solve for normal forces (alpha)
+                        qp_g_n = J_n @ vf_contact + G_nt @ beta
+                        qp_contact = proxqp.dense.QP(nc, 0, nc, False)
+                        qp_contact.init(H=G_n, g=qp_g_n, A=None, b=None, C=np.eye(nc), l=np.zeros(nc))
+                        qp_contact.solve()
+                        alpha = qp_contact.results.x
+
+                        # Solve for tangential forces (beta)
+                        qp_g_t = J_t @ vf_contact + G_nt.T @ alpha
+                        qp_friction = proxqp.dense.QP(J_t.shape[0], 0, J_t.shape[0] + nc, False)
+                        C_friction = np.vstack([E, -np.eye(J_t.shape[0])])
+                        u_friction = np.hstack([self.config.MU * alpha, np.zeros(J_t.shape[0])])
+                        qp_friction.init(H=G_t, g=qp_g_t, A=None, b=None, C=C_friction, u=u_friction)
+                        qp_friction.solve()
+                        beta = qp_friction.results.x
+
+                        # Check for convergence
+                        if np.linalg.norm(beta - beta_old) < self.config.STAGGERED_TOL: break
+                    
+                    # Update velocity with contact and friction impulses
+                    delta_v = Minv @ (J_n.T @ alpha + J_t.T @ beta)
+                    v = vf_contact + delta_v
+                else:
+                    # If friction is not enabled, just use the contact velocity
+                    v = vf_contact
+
+            # Integrate the new velocity to get the next state
+            q = pin.integrate(self.model, q, v * DT)
+
+            #  Visualize the simulation at the specified frequency
+            if self.config.DT_VISU is not None and (t * DT) % self.config.DT_VISU < DT:
+                updateVisualObjects(self.model, self.data, self.contact_models, self.contact_datas, self.visual_model, self.viz)
+                self.viz.display(q)
+                
+                if self.config.record_video and self.writer is not None:
+                    img = self.viz.viewer.get_image()
+                    img_resized = img.resize(self.config.video_resolution, Image.Resampling.LANCZOS)
+                    self.writer.append_data(np.array(img_resized))
+                
+                time.sleep(max(0, self.config.DT_VISU - (time.time() - self.viz.last_time)))
+                self.viz.last_time = time.time()
+        
+        if self.config.record_video and self.writer is not None:
+            self.writer.close()
+            print(f"Video saved successfully to {self.config.video_filepath}")
+
+
+# Test the simulation with a simple example
+
+if __name__ == "__main__":
+
+
+    # --- MODEL ---
+    model, geom_model = buildSceneCubes(3)
+    data = model.createData()
+    geom_data = geom_model.createData()
+
+    for req in geom_data.collisionRequests:
+        req.security_margin = 1e-2
+        req.num_max_contacts = 50
+        req.enable_contact = True
+
+
+    # --- SIMULATION PARAMETERS ---
+    DT = 1e-4
+    DT_VISU = 1/50.
+    DURATION = 5.
+    MU = 0.8
+    MAX_STAGGERED_ITERS = 20
+    STAGGERED_TOL = 1e-6
+    ENABLE_FRICTION = False
+
+    # Configure the simulation
+    config = SimulationConfig(model, dt=DT, dt_visu=DT_VISU, duration=DURATION, 
+                              mu=MU, max_staggered_iters=MAX_STAGGERED_ITERS, staggered_tol=STAGGERED_TOL,
+                              enable_friction=ENABLE_FRICTION,
+                              record_video=True, video_filename="cubes_no_friction.mp4",) 
+                              
+    simulation = Simulation(config, model, data, geom_model, geom_data)
+    
+    # Run simulator
+    simulation.run()
