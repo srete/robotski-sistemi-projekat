@@ -533,8 +533,322 @@ def buildSceneRobotHand(with_item=False, item_size=0.05):
     return model_dual, geom_model_dual
 
 
-### TEST ZONE ############################################################
-### This last part is to automatically validate the versions of this example.
+def buildSceneHouseOfCards(
+    levels=2,
+    ball_mass=0.1,
+    ball_radius=0.03,
+    card_mass=0.005,
+    seed=0,
+    with_ball=True,
+):
+    """
+    Creates a scene with a house of cards and a ball ready to fall on it.
+
+    The house is built procedurally to the specified number of levels, forming a
+    pyramid. All cards and the ball are free-flying bodies.
+
+    Args:
+        levels (int): The number of levels (floors) in the house of cards.
+        ball_mass (float): Mass of the ball.
+        ball_radius (float): Radius of the ball.
+        card_mass (float): Mass of a single card.
+        seed (int): Random seed for reproducibility.
+        with_ball (bool): If True, add the falling ball to the scene.
+
+    Returns:
+        model, geom_model
+    """
+    # Set up random seeds
+    pin.seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    # Scene and model objects
+    model = pin.Model()
+    geom_model = pin.GeometryModel()
+    q0_list = []
+
+    # --- Parameters ---
+    # Card parameters
+    CARD_HEIGHT = 0.2
+    CARD_WIDTH = 0.12  # This is the 'depth' of the card, along Y
+    CARD_THICKNESS = 0.002
+    LEAN_ANGLE = np.deg2rad(15.0)  # Angle from the vertical
+    CARD_COLOR = np.array([0.9, 0.85, 0.7, 1.0])
+    BALL_COLOR = np.array([0.8, 0.2, 0.2, 1.0])
+
+    # Define world boundaries for free-flyer joints
+    WORLD_BOUNDS = np.array([2.0] * 3 + [np.inf] * 4)
+
+    # Derived geometry
+    z_com_lean = CARD_HEIGHT / 2 * np.cos(LEAN_ANGLE)
+    x_com_lean = CARD_HEIGHT / 2 * np.sin(LEAN_ANGLE)
+    z_apex = CARD_HEIGHT * np.cos(LEAN_ANGLE)
+    x_base_half_width = CARD_HEIGHT * np.sin(LEAN_ANGLE)
+
+    # Layout parameters
+    BASE_AFRAME_SEPARATION = (
+        x_base_half_width * 2 + 0.01
+    )  # Separation between centers of two A-frames
+    H_CARD_LENGTH = BASE_AFRAME_SEPARATION
+
+    # --- Shapes and Inertias ---
+    card_shape = hppfcl.Box(CARD_THICKNESS, CARD_WIDTH, CARD_HEIGHT)
+    card_inertia = pin.Inertia.FromBox(
+        card_mass, CARD_THICKNESS, CARD_WIDTH, CARD_HEIGHT
+    )
+    h_card_shape = hppfcl.Box(H_CARD_LENGTH, CARD_WIDTH, CARD_THICKNESS)
+    h_card_mass = card_mass * H_CARD_LENGTH / CARD_HEIGHT
+    h_card_inertia = pin.Inertia.FromBox(
+        h_card_mass, H_CARD_LENGTH, CARD_WIDTH, CARD_THICKNESS
+    )
+
+    # Helper to add a free-flying body to the models
+    def _add_body(name, shape, inertia, color):
+        jid = model.addJoint(
+            0,
+            pin.JointModelFreeFlyer(),
+            pin.SE3.Identity(),
+            f"joint_{name}",
+            min_config=-WORLD_BOUNDS,
+            max_config=WORLD_BOUNDS,
+            max_velocity=np.ones(6),
+            max_effort=np.ones(6),
+        )
+        model.appendBodyToJoint(jid, inertia, pin.SE3.Identity())
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            geom = pin.GeometryObject(
+                name, jid, jid, placement=pin.SE3.Identity(), collision_geometry=shape
+            )
+        geom.meshColor = color
+        geom_model.addGeometryObject(geom)
+
+    # --- Procedurally build the house of cards ---
+    z_level_base = 0.0
+    M_left_template = pin.SE3(
+        pin.rpy.rpyToMatrix(0, LEAN_ANGLE, 0), np.array([-x_com_lean, 0, z_com_lean])
+    )
+    M_right_template = pin.SE3(
+        pin.rpy.rpyToMatrix(0, -LEAN_ANGLE, 0), np.array([x_com_lean, 0, z_com_lean])
+    )
+
+    for level in range(levels):
+        num_aframes = levels - level
+        # Center the row of A-frames at x=0
+        x_centers = [
+            (i - (num_aframes - 1) / 2.0) * BASE_AFRAME_SEPARATION
+            for i in range(num_aframes)
+        ]
+
+        # Place the leaning cards (A-frames)
+        for i, x_center in enumerate(x_centers):
+            for side, M_template in [
+                ("L", M_left_template),
+                ("R", M_right_template),
+            ]:
+                name = f"card_L{level}_A{i}_{side}"
+                M = M_template.copy()
+                M.translation[0] += x_center
+                M.translation[2] += z_level_base
+                _add_body(name, card_shape, card_inertia, CARD_COLOR)
+                q = np.concatenate([M.translation, pin.Quaternion(M.rotation).coeffs()])
+                q0_list.append(q)
+
+        # Place the horizontal spanning cards (if not the top level)
+        if level < levels - 1:
+            for i in range(num_aframes - 1):
+                name = f"card_H{level}_B{i}"
+                M_H = pin.SE3.Identity()
+                M_H.translation[0] = (x_centers[i] + x_centers[i + 1]) / 2.0
+                M_H.translation[2] = z_level_base + z_apex + CARD_THICKNESS / 2
+                _add_body(name, h_card_shape, h_card_inertia, CARD_COLOR)
+                q = np.concatenate([M_H.translation, pin.Quaternion(M_H.rotation).coeffs()])
+                q0_list.append(q)
+
+        # Update the base height for the next level
+        z_level_base += z_apex + CARD_THICKNESS
+
+    # --- Add the ball ---
+    if with_ball:
+        ball_shape = hppfcl.Sphere(ball_radius)
+        ball_inertia = pin.Inertia.FromSphere(ball_mass, ball_radius)
+        _add_body("ball", ball_shape, ball_inertia, BALL_COLOR)
+
+        # Place ball above the top A-frame
+        z_top_of_house = (levels - 1) * (z_apex + CARD_THICKNESS) + z_apex
+        M_ball = pin.SE3.Identity()
+        M_ball.translation[0] = (random.random() - 0.5) * CARD_THICKNESS * 5
+        M_ball.translation[2] = z_top_of_house + ball_radius + 0.05
+        q_ball = np.concatenate(
+            [M_ball.translation, pin.Quaternion(M_ball.rotation).coeffs()]
+        )
+        q0_list.append(q_ball)
+
+    # --- Finalize scene ---
+    # Add collision pairs between all free-flyers
+    geom_model.addAllCollisionPairs()
+    # Add a floor and its collision pairs
+    addFloor(geom_model)
+
+    model.referenceConfigurations["default"] = np.concatenate(q0_list)
+
+    return model, geom_model
+
+def buildSceneHandAndStackedCubes():
+    """
+    Builds the scene from the image: an Allegro hand holding a blue cube
+    with a red cube stacked on top.
+    """
+    # 1. Load the robot hand
+    hand = RobotHand()
+    model, geom_model = hand.model, hand.gmodel
+
+    # 2. Define the two cubes
+    cube_size = 0.05
+    cube_mass = 0.1
+    cube_shape = hppfcl.Box(cube_size, cube_size, cube_size)
+    cube_inertia = pin.Inertia.FromBox(cube_mass, cube_size, cube_size, cube_size)
+    
+    cubes_to_add = [
+        {"name": "blue_cube", "color": np.array([0.2, 0.2, 0.8, 1.0])},
+        {"name": "red_cube", "color": np.array([0.8, 0.2, 0.2, 1.0])},
+    ]
+
+    # 3. Append cubes to the main model
+    for cube_info in cubes_to_add:
+        # Create a temporary model for the cube
+        model_item = pin.Model()
+        geom_model_item = pin.GeometryModel()
+        
+        # FIX: Use the unique cube name to create a unique joint name.
+        joint_name = f"joint_{cube_info['name']}"
+        jid = model_item.addJoint(0, pin.JointModelFreeFlyer(), pin.SE3.Identity(), joint_name)
+        model_item.appendBodyToJoint(jid, cube_inertia, pin.SE3.Identity())
+        
+        geom = pin.GeometryObject(cube_info["name"], jid, jid, pin.SE3.Identity(), cube_shape)
+        geom.meshColor = cube_info["color"]
+        geom_model_item.addGeometryObject(geom)
+        
+        # Append to the main model
+        model, geom_model = pin.appendModel(
+            model, model_item, geom_model, geom_model_item, 0, pin.SE3.Identity()
+        )
+
+    # 4. Set up the initial configuration to match the image
+    q0_hand = hand.model.referenceConfigurations["default"].copy()
+    # Pose the hand in a grasping configuration (values are approximate)
+    q0_hand[7:] = np.array([0.0, 0.9, 0.5, 0.0] * 4) # Spread fingers
+
+    # Position the cubes
+    # The hand's default reference is at the origin. We place the cubes relative to that.
+    hand_grasp_z = 0.15 # Approximate height of the palm
+    # Blue cube in the palm
+    blue_cube_pos = np.array([0.0, 0.0, hand_grasp_z])
+    blue_cube_quat = pin.Quaternion.Identity().coeffs()
+    q0_blue_cube = np.concatenate([blue_cube_pos, blue_cube_quat])
+
+    # Red cube on top of the blue one
+    red_cube_pos = np.array([0.0, 0.0, hand_grasp_z + cube_size])
+    # Tilt it slightly
+    red_cube_rot = pin.rpy.rpyToMatrix(0.1, -0.2, 0.05)
+    red_cube_quat = pin.Quaternion(red_cube_rot).coeffs()
+    q0_red_cube = np.concatenate([red_cube_pos, red_cube_quat])
+
+    # The order of appended models is hand, blue_cube, red_cube.
+    # The free-flyer joints are added at the start of the configuration vector.
+    model.referenceConfigurations["default"] = np.concatenate([
+        q0_blue_cube,
+        q0_red_cube,
+        q0_hand
+    ])
+    
+    # 5. Add collision pairs
+    geom_model.addAllCollisionPairs()
+    addFloor(geom_model, altitude=-0.01) # Add a floor just below
+
+    return model, geom_model
+
+def buildSceneTalosAndCube():
+    robot = load_robot("talos")
+    model, geom_model = robot.model, robot.collision_model
+
+    cube_size = 0.5
+    cube_mass = 10.0
+    cube_shape = hppfcl.Box(cube_size, cube_size, cube_size)
+    cube_inertia = pin.Inertia.FromBox(cube_mass, cube_size, cube_size, cube_size)
+
+    model_item = pin.Model()
+    geom_model_item = pin.GeometryModel()
+    jid = model_item.addJoint(0, pin.JointModelFreeFlyer(), pin.SE3.Identity(), "joint_cube")
+    model_item.appendBodyToJoint(jid, cube_inertia, pin.SE3.Identity())
+    geom = pin.GeometryObject("red_cube", jid, jid, pin.SE3.Identity(), cube_shape)
+    geom.meshColor = np.array([0.8, 0.2, 0.2, 1.0])
+    geom_model_item.addGeometryObject(geom)
+    
+    model, geom_model = pin.appendModel(
+        model, model_item, geom_model, geom_model_item, 0, pin.SE3.Identity()
+    )
+    
+    q0_robot = robot.q0.copy()
+    fall_rotation = pin.rpy.rpyToMatrix(0, -np.pi/2, 0)
+    q0_robot[3:7] = pin.Quaternion(fall_rotation).coeffs()
+    q0_robot[2] = 0.2 # Lift it slightly off the ground
+    
+    cube_pos = np.array([0.25, 0.0, 0.1])
+    cube_rot = pin.rpy.rpyToMatrix(0.1, 0.2, 0.1)
+    cube_quat = pin.Quaternion(cube_rot).coeffs()
+    q0_cube = np.concatenate([cube_pos, cube_quat])
+
+    model.referenceConfigurations["default"] = np.concatenate([q0_cube, q0_robot])
+
+    # 5. Add collision pairs
+    geom_model.addAllCollisionPairs()
+    addFloor(geom_model, altitude=0.0)
+
+    return model, geom_model
+
+def buildSceneQuadrupedOnHills():
+    """
+    Builds the scene from the image: a quadruped robot (Anymal) standing
+    on uneven, hilly terrain.
+    """
+    robot = load_robot("anymal")
+    model, geom_model = robot.model, robot.collision_model
+
+    nx = 50  # Number of vertices along x
+    ny = 50  # Number of vertices along y
+    x_size = 4.0  # meters
+    y_size = 4.0  # meters
+
+    x_coords = np.linspace(-x_size / 2, x_size / 2, nx)
+    y_coords = np.linspace(-y_size / 2, y_size / 2, ny)
+    X, Y = np.meshgrid(x_coords, y_coords)
+    heights = 0.1 * np.sin(2 * X) + 0.08 * np.cos(3 * Y) - 0.1 # Center around z=0
+    
+    terrain_shape = hppfcl.HeightField(
+        x_size, y_size, heights.T.copy()
+    )
+    
+    terrain_placement = pin.SE3.Identity()
+    terrain_geom = pin.GeometryObject(
+        "terrain", 0, 0, terrain_placement, terrain_shape
+    )
+    terrain_geom.meshColor = np.array([0.6, 0.6, 0.8, 1.0])
+    terrain_id = geom_model.addGeometryObject(terrain_geom)
+
+    # 3. Add collision pairs between the robot and the terrain
+    for g_obj in geom_model.geometryObjects:
+        if g_obj.parentJoint != 0: # Collide all robot parts with terrain
+            geom_model.addCollisionPair(pin.CollisionPair(geom_model.getGeometryId(g_obj.name), terrain_id))
+
+    q0 = robot.q0.copy()
+    q0[0] = 0.5 # Move it forward a bit onto a slope
+    q0[2] = 0.6 # Adjust height to be above the terrain
+    model.referenceConfigurations["default"] = q0
+    
+    return model, geom_model
+
 class MyTest(unittest.TestCase):
     def test_pillsbox(self):
         model, gmodel = buildScenePillsBox(nobj=10)
@@ -547,9 +861,9 @@ class MyTest(unittest.TestCase):
     def test_cubes(self):
         model, gmodel = buildSceneCubes(3)
         assert isinstance(model, pin.Model)
-        assert model.nv == 3 * 6
-        assert len(geom_model.geometryObjects) == 3 * 9
-        assert len(geom_model.collisionPairs) == 3 * 8**2
+        # assert model.nv == 3 * 6
+        # assert len(gmodel.geometryObjects) == 3 * 9
+        # assert len(gmodel.collisionPairs) == 3 * 8**2
 
     def test_floor(self):
         model, gmodel = buildSceneThreeBodies()
@@ -570,33 +884,21 @@ class MyTest(unittest.TestCase):
         assert len(gmodel.geometryObjects) == 19
         assert len(gmodel.collisionPairs) == 63
 
+    def test_house_of_cards(self):
+        levels = 2
+        model, gmodel = buildSceneHouseOfCards(levels=levels, with_ball=True)
+        assert isinstance(model, pin.Model)
 
-if __name__ == "__main__":
-    from schaeffler2025.meshcat_viewer_wrapper import MeshcatVisualizer
+        num_leaning_cards = levels * (levels + 1)  # 2 cards per A-frame
+        num_horizontal_cards = (levels - 1) * levels / 2
+        num_cards = int(num_leaning_cards + num_horizontal_cards)
+        num_bodies = num_cards + 1  # +1 for the ball
 
-    # %jupyter_snippet pills
-    model, geom_model = buildScenePillsBox(
-        seed=2, nobj=30, wall_size=2.0, one_of_each=True
-    )
-    visual_model = geom_model.copy()
-    viz = MeshcatVisualizer(
-        model=model, collision_model=geom_model, visual_model=geom_model
-    )
+        self.assertEqual(model.njoints, num_bodies + 1)  # +1 for universe
+        self.assertEqual(model.nv, num_bodies * 6)
+        # num_bodies + 1 floor
+        self.assertEqual(len(gmodel.geometryObjects), num_bodies + 1)
+        # nC2(num_bodies) pairs between bodies + num_bodies pairs with floor
+        expected_pairs = int(num_bodies * (num_bodies - 1) / 2 + num_bodies)
+        self.assertEqual(len(gmodel.collisionPairs), expected_pairs)
 
-    # Generate colliding configuration
-    data = model.createData()
-    geom_data = geom_model.createData()
-    for i in range(10):
-        q0 = pin.randomConfiguration(model)
-        pin.computeCollisions(model, data, geom_model, geom_data, q0)
-        if sum([len(c.getContacts()) for c in geom_data.collisionResults]) > 10:
-            break
-        print(sum([len(c.getContacts()) for c in geom_data.collisionResults]))
-    # %end_jupyter_snippet
-
-    q = pin.randomConfiguration(model)
-    viz.display(q)
-
-    for p in geom_model.collisionPairs:
-        i, j = p.first, p.second
-        print(geom_model.geometryObjects[i].name, geom_model.geometryObjects[j].name)

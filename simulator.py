@@ -11,7 +11,7 @@ from proxsuite import proxqp
 import proxsuite
 
 from tp5.create_rigid_contact_models_for_hppfcl import createContactModelsFromCollisions
-from tp5.scenes import buildSceneThreeBodies, buildScenePillsBox, buildSceneCubes, buildSceneRobotHand
+from tp5.scenes import buildSceneThreeBodies, buildScenePillsBox, buildSceneCubes, buildSceneRobotHand, buildSceneHouseOfCards
 from tp5.display_collision_patches import preallocateVisualObjects, updateVisualObjects
 
 from schaeffler2025.meshcat_viewer_wrapper import MeshcatVisualizer
@@ -208,7 +208,7 @@ if __name__ == "__main__":
 
 
     # --- MODEL ---
-    model, geom_model = buildSceneCubes(3)
+    model, geom_model = buildSceneHouseOfCards(seed = 42)
     data = model.createData()
     geom_data = geom_model.createData()
 
