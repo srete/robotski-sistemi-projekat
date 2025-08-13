@@ -636,36 +636,31 @@ def buildSceneHouseOfCards(
     np.random.seed(seed)
     random.seed(seed)
 
-    # Scene and model objects
     model = pin.Model()
     geom_model = pin.GeometryModel()
     q0_list = []
-
-    # --- Parameters ---
-    # Card parameters
+ 
     CARD_HEIGHT = 0.2
-    CARD_WIDTH = 0.12  # This is the 'depth' of the card, along Y
+    CARD_WIDTH = 0.12  
     CARD_THICKNESS = 0.002
-    LEAN_ANGLE = np.deg2rad(15.0)  # Angle from the vertical
+    LEAN_ANGLE = np.deg2rad(15.0)  
     CARD_COLOR = np.array([0.9, 0.85, 0.7, 1.0])
     BALL_COLOR = np.array([0.8, 0.2, 0.2, 1.0])
 
-    # Define world boundaries for free-flyer joints
     WORLD_BOUNDS = np.array([2.0] * 3 + [np.inf] * 4)
 
-    # Derived geometry
     z_com_lean = CARD_HEIGHT / 2 * np.cos(LEAN_ANGLE)
     x_com_lean = CARD_HEIGHT / 2 * np.sin(LEAN_ANGLE)
     z_apex = CARD_HEIGHT * np.cos(LEAN_ANGLE)
     x_base_half_width = CARD_HEIGHT * np.sin(LEAN_ANGLE)
 
-    # Layout parameters
+ 
     BASE_AFRAME_SEPARATION = (
         x_base_half_width * 2 + 0.01
-    )  # Separation between centers of two A-frames
+    ) 
     H_CARD_LENGTH = BASE_AFRAME_SEPARATION
 
-    # --- Shapes and Inertias ---
+
     card_shape = hppfcl.Box(CARD_THICKNESS, CARD_WIDTH, CARD_HEIGHT)
     card_inertia = pin.Inertia.FromBox(
         card_mass, CARD_THICKNESS, CARD_WIDTH, CARD_HEIGHT
@@ -676,7 +671,6 @@ def buildSceneHouseOfCards(
         h_card_mass, H_CARD_LENGTH, CARD_WIDTH, CARD_THICKNESS
     )
 
-    # Helper to add a free-flying body to the models
     def _add_body(name, shape, inertia, color):
         jid = model.addJoint(
             0,
@@ -697,7 +691,6 @@ def buildSceneHouseOfCards(
         geom.meshColor = color
         geom_model.addGeometryObject(geom)
 
-    # --- Procedurally build the house of cards ---
     z_level_base = 0.0
     M_left_template = pin.SE3(
         pin.rpy.rpyToMatrix(0, LEAN_ANGLE, 0), np.array([-x_com_lean, 0, z_com_lean])
@@ -708,13 +701,11 @@ def buildSceneHouseOfCards(
 
     for level in range(levels):
         num_aframes = levels - level
-        # Center the row of A-frames at x=0
         x_centers = [
             (i - (num_aframes - 1) / 2.0) * BASE_AFRAME_SEPARATION
             for i in range(num_aframes)
         ]
 
-        # Place the leaning cards (A-frames)
         for i, x_center in enumerate(x_centers):
             for side, M_template in [
                 ("L", M_left_template),
@@ -760,107 +751,88 @@ def buildSceneHouseOfCards(
     model.referenceConfigurations["default"] = np.concatenate(q0_list)
 
     return model, geom_model
-def buildSceneHandAndStackedCubes():
-    robot_fixed_base = RobotHand()
 
-    # Base models
+def buildSceneHandAndStackedCubes():
+    """
+    Builds a Pinocchio scene with a fixed-base robot hand and two free-floating cubes.
+    """
+    robot_hand = RobotHand()
+
     model = pin.Model()
     geom_model = pin.GeometryModel()
     visual_model = pin.GeometryModel()
 
-    base_joint_id = model.addJoint(
-    0, pin.JointModelFixed(), pin.SE3.Identity(), "hand_base_joint"
-    )
-
-    # Create a frame for this joint (BODY type so you can attach things)
-    base_frame = pin.Frame(
-        "hand_base_frame",
-        base_joint_id,
-        0,
-        pin.SE3.Identity(),
-        pin.FrameType.BODY
-    )
-    base_frame_id = model.addFrame(base_frame)
+    hand_base_rotation = pin.rpy.rpyToMatrix(0, 0, 0) 
+    hand_base_position = np.array([0.0, 0.0, 0.1])
+    hand_base_pose = pin.SE3(hand_base_rotation, hand_base_position)
 
     model, geom_model = pin.appendModel(
         model,
-        robot_fixed_base.model,
+        robot_hand.model,
         geom_model,
-        robot_fixed_base.gmodel,
-        base_frame_id,
-        pin.SE3.Identity()
+        robot_hand.gmodel,
+        0,
+        hand_base_pose
     )
 
-    # Append visuals manually to avoid geometry index conflicts
-    for visual_obj in robot_fixed_base.visual_model.geometryObjects:
+    for visual_obj in robot_hand.visual_model.geometryObjects:
         visual_copy = visual_obj.copy()
-        parent_joint_name = robot_fixed_base.model.names[visual_obj.parentJoint]
+        parent_joint_name = robot_hand.model.names[visual_obj.parentJoint]
         parent_joint_id = model.getJointId(parent_joint_name)
         visual_copy.parentJoint = parent_joint_id
         visual_model.addGeometryObject(visual_copy)
 
-    # Cube parameters
+
     cube_size = 0.04
     cube_mass = 0.1
     cube_shape = hppfcl.Box(cube_size, cube_size, cube_size)
     cube_inertia = pin.Inertia.FromBox(cube_mass, cube_size, cube_size, cube_size)
-
-    cube_stack_height = 0.25 
+    
 
     cubes_to_add = [
-        {"name": "blue_cube", "color": np.array([0.2, 0.2, 0.8, 1.0]), "position": np.array([0.0, 0.0, cube_stack_height])},
-        {"name": "red_cube",  "color": np.array([0.8, 0.2, 0.2, 1.0]), "position": np.array([0.0, 0.0, cube_stack_height + cube_size * 1.2])},
+        {"name": "blue_cube", "color": np.array([0.2, 0.2, 0.8, 1.0]), "position": np.array([0.0, 0.0, 0.25])},
+        {"name": "red_cube",  "color": np.array([0.8, 0.2, 0.2, 1.0]), "position": np.array([0.0, 0.0, 0.25 + cube_size * 1.2])},
     ]
+
+    q0_cubes = []
 
     for cube_info in cubes_to_add:
         model_item = pin.Model()
         geom_item = pin.GeometryModel()
+        visual_item = pin.GeometryModel()
 
-        jid = model_item.addJoint(
-            0, pin.JointModelFreeFlyer(), pin.SE3.Identity(),
-            f"joint_{cube_info['name']}"
+        joint_id = model_item.addJoint(
+            0, pin.JointModelFreeFlyer(), pin.SE3.Identity(), f"joint_{cube_info['name']}"
         )
-        model_item.appendBodyToJoint(jid, cube_inertia, pin.SE3.Identity())
-
+        model_item.appendBodyToJoint(joint_id, cube_inertia, pin.SE3.Identity())
+        
         geom = pin.GeometryObject(
-            cube_info['name'], jid, jid, pin.SE3.Identity(), cube_shape
+            cube_info['name'], joint_id, 0, pin.SE3.Identity(), cube_shape
         )
         geom.meshColor = cube_info['color']
         geom_item.addGeometryObject(geom)
+        visual_item.addGeometryObject(geom.copy())
 
-        model, geom_model = pin.appendModel(
-            model, model_item, geom_model, geom_item, 0, pin.SE3.Identity()
-        )
+        model, geom_model = pin.appendModel(model, model_item, geom_model, geom_item, 0, pin.SE3.Identity())
 
-        visual_geom = geom.copy()
-        visual_geom.parentJoint = model.getJointId(f"joint_{cube_info['name']}")
-        visual_model.addGeometryObject(visual_geom)
+        for visual_obj in visual_item.geometryObjects:
+            visual_copy = visual_obj.copy()
+            parent_joint_name = model_item.names[visual_obj.parentJoint]
+            parent_joint_id = model.getJointId(parent_joint_name)
+            visual_copy.parentJoint = parent_joint_id
+            visual_model.addGeometryObject(visual_copy)
 
-    # Hand's default configuration
-    nq_hand_with_base = 7 + robot_fixed_base.model.nq
-    q0_hand_with_base = np.zeros(nq_hand_with_base)
-    q0_hand_with_base[2] = 0.15  # z-height
-    rot_x_neg_90 = pin.rpy.rpyToMatrix(-np.pi / 2, 0, 0)
-    q0_hand_with_base[3:7] = pin.Quaternion(rot_x_neg_90).coeffs()
-    q0_hand_with_base[7:] = robot_fixed_base.q0
+        q0_cube = np.concatenate([cube_info['position'], pin.Quaternion.Identity().coeffs()])
+        q0_cubes.append(q0_cube)
 
-    # Fixed cube poses hardcoded (position + quaternion)
-    def pose_to_q(pos):
-        return np.concatenate([pos, [0, 0, 0, 1]])  # Identity quaternion
+    q0_hand = robot_hand.q0
 
-    q0_blue_cube = pose_to_q(cubes_to_add[0]['position'])
-    q0_red_cube = pose_to_q(cubes_to_add[1]['position'])
-
-    model.referenceConfigurations["default"] = np.concatenate([
-        q0_blue_cube,
-        q0_red_cube,
-        q0_hand_with_base
-    ])
+    model.referenceConfigurations["default"] = np.concatenate([q0_hand] + q0_cubes)
 
     addFloor(geom_model)
+    addFloor(visual_model)
 
-    return model, visual_model
-
+    return model, geom_model, visual_model
 
 
 def buildSceneTalosFallingCube():
