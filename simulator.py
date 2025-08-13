@@ -25,7 +25,7 @@ class SimulationConfig:
                  enable_friction=True,
                  enable_contact=True,
                  record_video=False, recording_dir='recordings/', 
-                 video_filename=None, video_resolution=(1280, 720),
+                 video_filename=None, video_resolution=(1920, 1088),
                  initial_v=None):
         
         # --- Simulation Parameters ---
@@ -122,6 +122,9 @@ class Simulation:
         q, v, tau = self.config.q, self.config.v, self.config.tau
         DT = self.config.DT
 
+        conv = False
+        num_of_iters = []
+        num_not_conv = 0
         # Main simulation loop
         for t in range(self.config.T):
             # Compute collisions and create contact models
@@ -194,8 +197,15 @@ class Simulation:
                         beta = qp_friction.results.x
 
                         # Check for convergence
-                        if np.linalg.norm(beta - beta_old) < self.config.STAGGERED_TOL: break
+                        if np.linalg.norm(beta - beta_old) < self.config.STAGGERED_TOL: 
+                            #print(f"Converged after {k+1} iterations.")
+                            conv = True
+                            num_of_iters.append(k+1)
+                            break
                     
+                    if not conv:
+                        print(f"Warning: Staggered solver did not converge after {self.config.MAX_STAGGERED_ITERS} iterations.")
+                        num_not_conv += 1
                     # Update velocity with contact and friction impulses
                     delta_v = Minv @ (J_n.T @ alpha + J_t.T @ beta)
                     v = vf_contact + delta_v
@@ -222,6 +232,8 @@ class Simulation:
         if self.config.record_video and self.writer is not None:
             self.writer.close()
             print(f"Video saved successfully to {self.config.video_filepath}")
+        
+        return num_of_iters, num_not_conv
 
 
 # Test the simulation with a simple example
