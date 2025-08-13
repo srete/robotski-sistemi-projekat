@@ -140,7 +140,7 @@ class Simulation:
                 
                 M = pin.crba(self.model, self.data, q)
                 b = pin.nle(self.model, self.data, q, v)
-                tauq = -self.Kp * pin.difference(self.model, q, self.qdes(t*DT)) - self.Kv * (v - self.qdes.velocity(t*DT)) + self.qdes.acceleration(t*DT)                
+                tauq = -self.Kp *(q - self.qdes(t*DT)) - self.Kv * (v - self.qdes.velocity(t*DT)) + self.qdes.acceleration(t*DT)                
                 a_contorl = np.linalg.inv(M) @ (tauq - b)
                 vf = v + DT * a_contorl
             else:
