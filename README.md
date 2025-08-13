@@ -15,4 +15,5 @@ uv pip install imageio[ffmpeg]
 Create a recording directory
 ```bash
 mkdir recordings
+mkdir figures
 ```
