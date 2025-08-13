@@ -25,7 +25,7 @@ class SimulationConfig:
                  enable_friction=True,
                  enable_contact=True,
                  record_video=False, recording_dir='recordings/', 
-                 video_filename=None, video_resolution=(1280, 720),
+                 video_filename=None, video_resolution=(1920, 1088),
                  initial_v=None):
         
         # --- Simulation Parameters ---
