@@ -12,4 +12,14 @@ STAGGERED_TOL = 1e-5
 Number of iterations when did not converge: 8750
 
 ---  Robotic hand
+req.security_margin = 1e-2
+req.num_max_contacts = 10
+MAX_STAGGERED_ITERS = 20
+STAGGERED_TOL = 1e-6
 Number of iterations when did not converge: 13841
+
+--- Pyramid and ball
+req.security_margin = 1e-2
+req.num_max_contacts = 10
+MAX_STAGGERED_ITERS = 5
+STAGGERED_TOL = 1e-5
