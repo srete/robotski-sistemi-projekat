@@ -168,6 +168,7 @@ class Simulation:
                 vf_contact = qp1.results.x
                 
                 if self.config.enable_friction:
+                    conv = False
                     # Second QP -- Solve for friction forces
                     # velocity from the first QP is the free velocity for the friction solve
                     J_n, J_t, E = self.get_staggered_jacobians_from_pinocchio()

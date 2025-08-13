@@ -1,0 +1,15 @@
+--- Cubes
+req.security_margin = 1e-4
+req.num_max_contacts = 5
+MAX_STAGGERED_ITERS = 20
+STAGGERED_TOL = 1e-6
+Number of iterations when did not converge: 3953
+
+--- House of cards
+MAX_STAGGERED_ITERS = 5
+req.security_margin = 1e-2
+STAGGERED_TOL = 1e-5
+Number of iterations when did not converge: 8750
+
+---  Robotic hand
+Number of iterations when did not converge: 13841
